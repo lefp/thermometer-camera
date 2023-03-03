@@ -9,6 +9,7 @@ from skimage.color import rgb2gray
 from skimage.feature import (match_descriptors, corner_harris, corner_peaks, ORB, plot_matches)
 import matplotlib.pyplot as plt
 import pytesseract as tess
+import itertools
 
 def parse_args():
     parser = ArgumentParser()
@@ -57,21 +58,20 @@ if __name__ == '__main__':
     args = parse_args()
     
     orig_ref = sk.io.imread('thermometer_reference.jpg')
+    ref_mask = sk.io.imread('thermometer_reference_mask.png', as_gray=True)
+    assert(np.unique(ref_mask).tolist() == [0, 1]) # had issues with the mask not actually being binary
+    ref_mask = ref_mask.astype(bool)
 
     while True:
         # fetch and decode image
-        # im_input = bytearray(urlopen(args.url).read())
-        # im_input = cv.imdecode(np.asarray(im_input), cv.IMREAD_COLOR)
         orig_im = sk.io.imread(args.url)
 
         im_points, ref_points = get_matching_points(orig_im, orig_ref)
         n_matches = np.shape(im_points)[0]
         print(f"{n_matches} matched keypoints")
-        # for i in range(n_matches):
-        #     orig_ref[sk.draw.circle_perimeter(ref_points[i,0], ref_points[i, 1], 4)] = (255, 0, 0)
-        #     orig_im [sk.draw.circle_perimeter(im_points [i,0], im_points [i, 1], 4)] = (255, 0, 0)
 
-        fig, ax = plt.subplots(nrows=2, ncols=1)
+        fig, ax = plt.subplots(nrows=2, ncols=2)
+        ax = list(itertools.chain.from_iterable(ax)) # flatten 2D array of axes
         for a in ax: a.axis('off')
         plt.gray()
 
@@ -85,7 +85,7 @@ if __name__ == '__main__':
         translations = im_points - ref_points
         # assume the median translation is correct
         # @todo didn't think hard when choosing the median; but most translations are within a pixel of it
-        translation = np.median(translations, axis=0)
+        translation = np.median(translations, axis=0).astype(np.int32)
         # discard matches whose translation is too far from the "correct" one
         # @todo this step isn't actually required; we don't use the result
         translations = translations[
@@ -98,7 +98,24 @@ if __name__ == '__main__':
         im_rect = orig_im
         im_rect[sk.draw.rectangle_perimeter(top_left, bottom_right)] = (255, 0, 0)
         ax[1].imshow(im_rect)
+        # crop
+        im_thermo = orig_im[top_left[0]:bottom_right[0], top_left[1]:bottom_right[1], :]
+
+        # im_thermo=sk.filters.gaussian(im_thermo, sigma=0.5, channel_axis=2)
+        im_thermo = (rgb2gray(im_thermo)*255).astype(np.uint8) # rgb2gray returns floats
+        im_thermo[~ref_mask] = 0 # set the background to black
+        ax[2].imshow(im_thermo)
+        thresh, im_thermo = cv.threshold(
+            im_thermo, thresh=None, maxval=255, type=cv.THRESH_BINARY|cv.THRESH_OTSU
+        )
+        print(f"Otsu threshold: {thresh}")
+
+        # get rid of black specks
+        im_thermo = sk.morphology.remove_small_holes(im_thermo.astype(bool), area_threshold=10)
+
+        # get the numbers from the image
+        im = sk.color.gray2rgb(im_thermo)
+        ax[3].imshow(im_thermo)
+        print(tess.image_to_data(im_thermo, lang='eng', config='--psm 12 --oem 1'))
 
         plt.show()
-
-        # @todo next step: get the numbers off the thermometer
