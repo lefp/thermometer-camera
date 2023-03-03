@@ -10,52 +10,62 @@ from skimage.feature import (match_descriptors, corner_harris, corner_peaks, ORB
 import matplotlib.pyplot as plt
 import pytesseract as tess
 
-MIN_FRAME_INTERVAL_S = 1
-
 def parse_args():
     parser = ArgumentParser()
     parser.add_argument('url')
     return parser.parse_args()
 
+"""Uses ORB to find matching points between the input `im` and reference image `ref`.
+Expects inputs to be 3-channel integer images in [0, 255].
+Returns (im_points, ref_points) where
+    im_points[i, :] is a point in the input image matching ref_points[i, :]
+"""
+def get_matching_points(im, ref): # -> (np.ndarray, np.ndarray)
+    # clone so we don't accidentally mutate the input
+    im  = im .copy()
+    ref = ref.copy()
+
+    # perform edge detection on both images first; keypoint matching has been much more accurate this way
+    ref = sk.filters.gaussian(ref, sigma=0.5, channel_axis=2)
+    im  = sk.filters.gaussian(im , sigma=0.5, channel_axis=2)
+    ref = rgb2gray(ref)
+    im  = rgb2gray(im )
+    ref = cv.Canny((255*ref).astype(np.uint8), 150, 200)
+    im  = cv.Canny((255*im ).astype(np.uint8), 150, 200)
+
+    descriptor_extractor = ORB(n_keypoints=300)
+
+    # get keypoints and descriptors
+    descriptor_extractor.detect_and_extract(ref)
+    keypoints_ref   = descriptor_extractor.keypoints
+    descriptors_ref = descriptor_extractor.descriptors
+    #
+    descriptor_extractor.detect_and_extract(im )
+    keypoints_im    = descriptor_extractor.keypoints
+    descriptors_im  = descriptor_extractor.descriptors
+
+    # get indices of keypoints with matching descriptors
+    matches = match_descriptors(descriptors_im, descriptors_ref, cross_check=True)
+
+    # use the indices to get the points
+    im_points  = keypoints_im [matches[:, 0], :].round().astype(np.int32)
+    ref_points = keypoints_ref[matches[:, 1], :].round().astype(np.int32)
+
+    return (im_points, ref_points)
+
 if __name__ == '__main__':
     args = parse_args()
     
-    ref = sk.io.imread('thermometer_reference.jpg')
-    orig_ref = ref
-
-    ref = sk.filters.gaussian(ref, sigma=0.5, channel_axis=2)
-    ref = rgb2gray(ref)
-    ref = cv.Canny((255*ref).astype(np.uint8), 150, 200)
+    orig_ref = sk.io.imread('thermometer_reference.jpg')
 
     while True:
         # fetch and decode image
         # im_input = bytearray(urlopen(args.url).read())
         # im_input = cv.imdecode(np.asarray(im_input), cv.IMREAD_COLOR)
-        im = sk.io.imread(args.url)
-        orig_im = im
+        orig_im = sk.io.imread(args.url)
 
-        im = sk.filters.gaussian(im, sigma=0.5, channel_axis=2)
-        im = rgb2gray(im)
-        im = cv.Canny((255*im).astype(np.uint8), 150, 200)
-
-        descriptor_extractor = ORB(n_keypoints=300)
-
-        descriptor_extractor.detect_and_extract(ref)
-        keypoints_ref   = descriptor_extractor.keypoints
-        descriptors_ref = descriptor_extractor.descriptors
-        #
-        descriptor_extractor.detect_and_extract(im)
-        keypoints_im   = descriptor_extractor.keypoints
-        descriptors_im = descriptor_extractor.descriptors
-
-        matches = match_descriptors(descriptors_im, descriptors_ref, cross_check=True)
-
-        # src_descriptors = descriptors[matches[:, 0]]
-        # print(keypoints_to_match); print(np.shape(keypoints_to_match));
-        # print(np.shape(matches)); exit(0)
-        n_matches = matches.shape[0]
-        im_points  = keypoints_im [matches[:, 0], :].round().astype(np.int32)
-        ref_points = keypoints_ref[matches[:, 1], :].round().astype(np.int32)
+        im_points, ref_points = get_matching_points(orig_im, orig_ref)
+        n_matches = np.shape(im_points)[0]
         print(f"{n_matches} matched keypoints")
         # for i in range(n_matches):
         #     orig_ref[sk.draw.circle_perimeter(ref_points[i,0], ref_points[i, 1], 4)] = (255, 0, 0)
@@ -65,7 +75,9 @@ if __name__ == '__main__':
         for a in ax: a.axis('off')
         plt.gray()
 
-        plot_matches(ax[0], orig_im, orig_ref, keypoints_im, keypoints_ref, matches)
+        plot_matches(ax[0], orig_im, orig_ref, im_points, ref_points,
+            np.repeat(np.arange(n_matches)[:, np.newaxis], repeats=2, axis=1) # hack to plot all points
+        )
 
         # find the translation from the reference to the image
         # @todo this assumes no rotation, shear, etc! a more robust solution would compute the homography from
