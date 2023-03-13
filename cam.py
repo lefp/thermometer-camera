@@ -8,8 +8,9 @@ import skimage as sk
 from skimage.color import rgb2gray
 from skimage.feature import (match_descriptors, corner_harris, corner_peaks, ORB, plot_matches)
 import matplotlib.pyplot as plt
-import pytesseract as tess
 import itertools
+
+REF_DATA_DIR = "reference-data"
 
 def parse_args():
     parser = ArgumentParser()
@@ -56,11 +57,19 @@ def get_matching_points(im, ref): # -> (np.ndarray, np.ndarray)
 
 if __name__ == '__main__':
     args = parse_args()
-    
-    orig_ref = sk.io.imread('thermometer_reference.jpg')
-    ref_mask = sk.io.imread('thermometer_reference_mask.png', as_gray=True)
-    assert(np.unique(ref_mask).tolist() == [0, 1]) # had issues with the mask not actually being binary
+
+    # get reference data
+    #
+    # reference image of the thermometer
+    orig_ref = sk.io.imread(REF_DATA_DIR + '/thermometer.jpg')
+    # mask of the thermometer in the image
+    ref_mask = sk.io.imread(REF_DATA_DIR + '/thermometer_mask.png', as_gray=True)
+    assert(set(np.unique(ref_mask)) == {0, 1}) # sanity check; have exported the mask incorrectly in the past
     ref_mask = ref_mask.astype(bool)
+    # position of the red temperature pointer's pivot
+    with open(REF_DATA_DIR + '/pivot_position.dat') as f:
+        line = next(f)
+        pivot_pos = np.array([int(val) for val in line.split()])
 
     while True:
         # fetch and decode image
@@ -70,12 +79,14 @@ if __name__ == '__main__':
         n_matches = np.shape(im_points)[0]
         print(f"{n_matches} matched keypoints")
 
-        fig, ax = plt.subplots(nrows=2, ncols=2)
+        fig, ax = plt.subplots(nrows=3, ncols=2)
+        plt.gray() # every 1-channel image should be displayed using the "gray" colormap
         ax = list(itertools.chain.from_iterable(ax)) # flatten 2D array of axes
-        for a in ax: a.axis('off')
-        plt.gray()
+        for a in ax: a.axis('off') # don't draw the axis lines
+        ax = iter(ax) # from now, every attempt to add a new plot should call next(ax)
 
-        plot_matches(ax[0], orig_im, orig_ref, im_points, ref_points,
+        plot_matches(
+            next(ax), orig_im, orig_ref, im_points, ref_points,
             np.repeat(np.arange(n_matches)[:, np.newaxis], repeats=2, axis=1) # hack to plot all points
         )
 
@@ -97,25 +108,31 @@ if __name__ == '__main__':
         bottom_right = np.shape(orig_ref)[:2] + translation
         im_rect = orig_im
         im_rect[sk.draw.rectangle_perimeter(top_left, bottom_right)] = (255, 0, 0)
-        ax[1].imshow(im_rect)
+        next(ax).imshow(im_rect)
         # crop
         im_thermo = orig_im[top_left[0]:bottom_right[0], top_left[1]:bottom_right[1], :]
 
-        # im_thermo=sk.filters.gaussian(im_thermo, sigma=0.5, channel_axis=2)
-        im_thermo = (rgb2gray(im_thermo)*255).astype(np.uint8) # rgb2gray returns floats
-        im_thermo[~ref_mask] = 0 # set the background to black
-        ax[2].imshow(im_thermo)
-        thresh, im_thermo = cv.threshold(
-            im_thermo, thresh=None, maxval=255, type=cv.THRESH_BINARY|cv.THRESH_OTSU
+        # get the direction of the red pointer
+        #
+        # convert to hsv
+        im_thermo_hsv = sk.color.rgb2hsv(im_thermo)
+        # next(ax).imshow(im_thermo_hsv)
+        im_thermo_hue = im_thermo_hsv[:, :, 0]
+        im_thermo_sat = im_thermo_hsv[:, :, 1]
+        im_thermo_val = im_thermo_hsv[:, :, 2]
+        # isolate red in image
+        im_pointer = (
+            ref_mask & # remove background
+            ((0.9 < im_thermo_hue) | (im_thermo_hue < 0.1)) & # red hue
+            (im_thermo_val > 0.3) & # filter out black
+            (im_thermo_sat > 0.3) # filter out white
         )
-        print(f"Otsu threshold: {thresh}")
-
-        # get rid of black specks
-        im_thermo = sk.morphology.remove_small_holes(im_thermo.astype(bool), area_threshold=10)
-
-        # get the numbers from the image
-        im = sk.color.gray2rgb(im_thermo)
-        ax[3].imshow(im_thermo)
-        print(tess.image_to_data(im_thermo, lang='eng', config='--psm 12 --oem 1'))
+        next(ax).imshow(im_pointer)
+        # delete noise spots by only keeping the largest connected component (i.e. the pointer)
+        # the "weights" part prevents the background from being counted
+        labeled = sk.measure.label(im_pointer, background=0)
+        largest_component_label = np.argmax(np.bincount(labeled.flat, weights=im_pointer.flat))
+        im_pointer = labeled == largest_component_label
+        next(ax).imshow(im_pointer)
 
         plt.show()
