@@ -4,11 +4,14 @@ from argparse import ArgumentParser
 from urllib.request import urlopen
 import cv2 as cv
 import numpy as np
-import skimage as sk
+import skimage as skim
+import sklearn
 from skimage.color import rgb2gray
-from skimage.feature import (match_descriptors, corner_harris, corner_peaks, ORB, plot_matches)
+from skimage.feature import match_descriptors, corner_harris, corner_peaks, ORB, plot_matches
+import scipy
 import matplotlib.pyplot as plt
 import itertools
+from math import sin, cos
 
 REF_DATA_DIR = "reference-data"
 
@@ -28,8 +31,8 @@ def get_matching_points(im, ref): # -> (np.ndarray, np.ndarray)
     ref = ref.copy()
 
     # perform edge detection on both images first; keypoint matching has been much more accurate this way
-    ref = sk.filters.gaussian(ref, sigma=0.5, channel_axis=2)
-    im  = sk.filters.gaussian(im , sigma=0.5, channel_axis=2)
+    ref = skim.filters.gaussian(ref, sigma=0.5, channel_axis=2)
+    im  = skim.filters.gaussian(im , sigma=0.5, channel_axis=2)
     ref = rgb2gray(ref)
     im  = rgb2gray(im )
     ref = cv.Canny((255*ref).astype(np.uint8), 150, 200)
@@ -61,9 +64,9 @@ if __name__ == '__main__':
     # get reference data
     #
     # reference image of the thermometer
-    orig_ref = sk.io.imread(REF_DATA_DIR + '/thermometer.jpg')
+    orig_ref = skim.io.imread(REF_DATA_DIR + '/thermometer.jpg')
     # mask of the thermometer in the image
-    ref_mask = sk.io.imread(REF_DATA_DIR + '/thermometer_mask.png', as_gray=True)
+    ref_mask = skim.io.imread(REF_DATA_DIR + '/thermometer_mask.png', as_gray=True)
     assert(set(np.unique(ref_mask)) == {0, 1}) # sanity check; have exported the mask incorrectly in the past
     ref_mask = ref_mask.astype(bool)
     # position of the red temperature pointer's pivot
@@ -73,7 +76,7 @@ if __name__ == '__main__':
 
     while True:
         # fetch and decode image
-        orig_im = sk.io.imread(args.url)
+        orig_im = skim.io.imread(args.url)
 
         im_points, ref_points = get_matching_points(orig_im, orig_ref)
         n_matches = np.shape(im_points)[0]
@@ -107,15 +110,15 @@ if __name__ == '__main__':
         top_left = translation
         bottom_right = np.shape(orig_ref)[:2] + translation
         im_rect = orig_im
-        im_rect[sk.draw.rectangle_perimeter(top_left, bottom_right)] = (255, 0, 0)
+        im_rect[skim.draw.rectangle_perimeter(top_left, bottom_right)] = (255, 0, 0)
         next(ax).imshow(im_rect)
         # crop
         im_thermo = orig_im[top_left[0]:bottom_right[0], top_left[1]:bottom_right[1], :]
 
-        # get the direction of the red pointer
+        # isolate the pointer in the image
         #
         # convert to hsv
-        im_thermo_hsv = sk.color.rgb2hsv(im_thermo)
+        im_thermo_hsv = skim.color.rgb2hsv(im_thermo)
         # next(ax).imshow(im_thermo_hsv)
         im_thermo_hue = im_thermo_hsv[:, :, 0]
         im_thermo_sat = im_thermo_hsv[:, :, 1]
@@ -128,11 +131,46 @@ if __name__ == '__main__':
             (im_thermo_sat > 0.3) # filter out white
         )
         next(ax).imshow(im_pointer)
+        # get rid of any holes or cracks in the pointer.
+        # Note we don't use `remove_small_holes` because the cracks may be connected to the background.
+        footprint = np.array([
+            [0, 0, 0, 1, 0, 0, 0,],
+            [0, 0, 1, 1, 1, 0, 0,],
+            [0, 1, 1, 1, 1, 1, 0,],
+            [1, 1, 1, 1, 1, 1, 1,],
+            [0, 1, 1, 1, 1, 1, 0,],
+            [0, 0, 1, 1, 1, 0, 0,],
+            [0, 0, 0, 1, 0, 0, 0 ]
+        ])
+        skim.morphology.binary_dilation(im_pointer, footprint=footprint, out=im_pointer)
+        skim.morphology.binary_erosion (im_pointer, footprint=footprint, out=im_pointer)
         # delete noise spots by only keeping the largest connected component (i.e. the pointer)
         # the "weights" part prevents the background from being counted
-        labeled = sk.measure.label(im_pointer, background=0)
+        labeled = skim.measure.label(im_pointer, background=0)
         largest_component_label = np.argmax(np.bincount(labeled.flat, weights=im_pointer.flat))
         im_pointer = labeled == largest_component_label
-        next(ax).imshow(im_pointer)
+
+        # get the pointer's orientation
+        #
+        props = skim.measure.regionprops(im_pointer.astype(np.uint8))[0] # [0] because there's only one region
+        # this direction is parallel to the pointer, but may be in the opposite direction
+        direction = np.array([cos(props.orientation), sin(props.orientation)])
+        # The pivot is offset from the pointer's centroid.
+        # Starting at the pivot, if we travel half the total length of the pointer in the correct direction,
+        # we will remain on the pointer. But if we travel backwards from the pivot by the same amount, we will
+        # leave the pointer.
+        # Therefore, iff we leave the pointer (i.e. reach the background) by such travel, then it's pointing
+        # in the direction opposite to what we thought.
+        half_pointer_len = 0.5 * props.axis_major_length
+        endpoint = pivot_pos + half_pointer_len * direction
+        if im_pointer[endpoint[0].astype(int), endpoint[1].astype(int)] == 0: direction = -direction
+
+        a = next(ax)
+        a.imshow(im_pointer)
+        a.plot( # point order is reversed because matplotlib's coordinate system is opposite to skimage's
+            (pivot_pos[1], pivot_pos[1] + half_pointer_len*direction[1]),
+            (pivot_pos[0], pivot_pos[0] + half_pointer_len*direction[0]),
+            '-r'
+        )
 
         plt.show()
