@@ -9,9 +9,10 @@ import sklearn
 from skimage.color import rgb2gray
 from skimage.feature import match_descriptors, corner_harris, corner_peaks, ORB, plot_matches
 import scipy
+import toml
 import matplotlib.pyplot as plt
 import itertools
-from math import sin, cos
+from math import sin, cos, pi
 
 REF_DATA_DIR = "reference-data"
 
@@ -19,6 +20,50 @@ def parse_args():
     parser = ArgumentParser()
     parser.add_argument('url')
     return parser.parse_args()
+
+"""
+Parses the toml file containing the thermometer's reference points;
+Returns a function `temperature(pointer_direction: [float, float]) -> float64` which:
+    Takes as input any vector parallel to the temperature pointer's direction (under skimage coordinates).
+    Returns the temperature the pointer is indicating.
+"""
+def function_mapping_pointer_vector_to_temperature(reference_points_fname):
+    ref_points = toml.load(reference_points_fname)
+    pivot_pos = np.array(ref_points["pivot_position"])
+    temperature_positions = ref_points["temperature_positions"]
+
+    # TOML assumes all keys are strings, so we need to convert them to integers
+    temperature_positions = {int(key): val for (key, val) in temperature_positions.items()}
+
+    # for each sample temperature, compute its angle
+    angle_to_temperature = dict()
+    for (temperature, position) in temperature_positions.items():
+        direction = np.array(position) - pivot_pos
+        angle = np.arctan2(direction[1], direction[0])
+        # `np.arctan2` returns is in [-pi, pi]; but we want the line of discontinuity to be from the pivot
+        # downwards (in order for interpolation to work), so we remap to `[0, 2*pi]`
+        if angle < 0: angle += 2*pi
+        angle_to_temperature[angle] = temperature
+
+    # convert the dict to arrays, the format expected by `np.interp`.
+    # Note: `np.interp` expects the angles to be sorted!
+    sample_angles = np.array(sorted(angle_to_temperature.keys()))
+    sample_temperatures = np.array([angle_to_temperature[ang] for ang in sample_angles])
+
+    # @debug
+    print('(temperature, angle) sample points:')
+    for (t, a) in zip(sample_temperatures, sample_angles): print((t, a))
+
+    def temperature_from_pointer_vector(pointer_vector): # [float, float] -> float64
+        print(f'pointer vector {pointer_vector}') # @debug
+        angle = np.arctan2(pointer_vector[1], pointer_vector[0])
+        # remap `np.arctan2` range from [-pi, pi] to [0, 2*pi]
+        if angle < 0: angle += 2*pi
+        print(f'pointer angle {angle}') # @debug
+        return np.interp([angle], sample_angles, sample_temperatures)[0]
+
+    return temperature_from_pointer_vector
+
 
 """Uses ORB to find matching points between the input `im` and reference image `ref`.
 Expects inputs to be 3-channel integer images in [0, 255].
@@ -70,10 +115,14 @@ if __name__ == '__main__':
     assert(set(np.unique(ref_mask)) == {0, 1}) # sanity check; have exported the mask incorrectly in the past
     ref_mask = ref_mask.astype(bool)
     # position of the red temperature pointer's pivot
-    with open(REF_DATA_DIR + '/pivot_position.dat') as f:
-        line = next(f)
-        pivot_pos = np.array([int(val) for val in line.split()])
+    pivot_pos = toml.load(REF_DATA_DIR + '/positions.toml')["pivot_position"]
 
+    # this gives us a function
+    temperature_from_pointer_vector = function_mapping_pointer_vector_to_temperature(
+        REF_DATA_DIR + '/positions.toml'
+    )
+
+    # main loop
     while True:
         # fetch and decode image
         orig_im = skim.io.imread(args.url)
@@ -166,11 +215,15 @@ if __name__ == '__main__':
         if im_pointer[endpoint[0].astype(int), endpoint[1].astype(int)] == 0: direction = -direction
 
         a = next(ax)
-        a.imshow(im_pointer)
+        a.imshow(im_thermo)
         a.plot( # point order is reversed because matplotlib's coordinate system is opposite to skimage's
             (pivot_pos[1], pivot_pos[1] + half_pointer_len*direction[1]),
             (pivot_pos[0], pivot_pos[0] + half_pointer_len*direction[0]),
-            '-r'
+            '-',
+            color='lime'
         )
+
+        temperature = temperature_from_pointer_vector(direction)
+        print(f'temperature: {temperature} degF')
 
         plt.show()
