@@ -10,3 +10,9 @@ Next steps:
 3. Set up a Discord bot that notifies the COSI Discord when the temperature deviates too much.
 
 ![image](https://user-images.githubusercontent.com/70862148/226531616-1a3c7fa6-2a44-4501-aec8-b230fa9dad3a.png)
+
+```
+pointer vector [-0.90801738  0.41893249]
+pointer angle 2.709323302031706
+temperature: 69.65961638225899 degF
+```
